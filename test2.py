@@ -2,6 +2,7 @@ import numpy as np
 import glfw
 from OpenGL.GL import *
 
+# 전역 변수로 primitive type을 저장합니다.
 primitive_type = GL_LINE_LOOP
 
 def key_event(window, key, scancode, action, mods):
@@ -31,8 +32,8 @@ def key_event(window, key, scancode, action, mods):
 def main():
     if not glfw.init():
         return
-    title = "2022046435-2-1"
-    window = glfw.create_window(480, 480, title, None, None)
+
+    window = glfw.create_window(480, 480, "2017123456-2-1", None, None)
     if not window:
         glfw.terminate()
         return
@@ -53,6 +54,7 @@ def render():
     glClear(GL_COLOR_BUFFER_BIT)
     glLoadIdentity()
 
+    # 정12각형을 그리기 위한 정점 계산
     num_sides = 12
     radius = 1
     angles = np.linspace(0, 2 * np.pi, num_sides, endpoint=False)
@@ -65,3 +67,4 @@ def render():
 
 if __name__ == "__main__":
     main()
+ 
