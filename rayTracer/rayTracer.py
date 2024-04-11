@@ -30,12 +30,16 @@ class Color:
         else:
             raise NotImplementedError("Unsupported type for addition with Color.")
 
-    def gammaCorrect(self, gamma):
-        inverseGamma = 1.0 / gamma
-        return Color(*np.power(self.color, inverseGamma))
+    def gammaCorrect(self, gamma=2.2):
+        # Apply gamma correction
+        corrected = np.power(self.color, 1.0 / gamma)
+        return Color(*corrected)
 
     def toUINT8(self):
-        return (np.clip(self.color, 0, 1) * 255).astype(np.uint8)
+        # First, apply gamma correction with the default or a specified gamma value
+        corrected = self.gammaCorrect().color
+        # Then, scale to [0, 255] and convert to integers
+        return (np.clip(corrected, 0, 1) * 255).astype(np.uint8)
 
     @staticmethod
     def from_hex(hex_str):
@@ -102,31 +106,47 @@ class Material:
         self.exponent = exponent if exponent else 1  # Default exponent to 1 for safety
 
     def shade(self, ray, hit_point, normal, view_dir, light, objects, depth=0, max_depth=3):
-        color = Color(0, 0, 0)  # Initialize color
-
-        # Lambertian shading
-        if self.type == "Lambertian":
-            light_dir = light.position - hit_point
-            light_dir /= np.linalg.norm(light_dir)
-            diffuse = max(np.dot(normal, light_dir), 0) * self.diffuse_color
-            color += diffuse
+        color = Color(0, 0, 0)  # Initialize color to black
         
-        # Phong shading
-        elif self.type == "Phong":
-            light_dir = light.position - hit_point
-            light_dir /= np.linalg.norm(light_dir)
-            diffuse = max(np.dot(normal, light_dir), 0) * self.diffuse_color
-            color += diffuse
+        # Calculate the direction from the hit point to the light
+        light_dir = light.position - hit_point
+        light_distance = np.linalg.norm(light_dir)
+        light_dir /= light_distance  # Normalize light direction
 
-            # Specular component
-            reflect_dir = 2 * normal * np.dot(normal, light_dir) - light_dir
-            spec_angle = max(np.dot(view_dir, reflect_dir), 0)
-            specular = (self.specular_color * np.power(spec_angle, self.exponent)) if spec_angle > 0 else Color(0, 0, 0)
-            color += specular
+        # Offset the hit point slightly along the normal to avoid self-intersection
+        shadow_origin = hit_point + normal * 0.001  # Offset by a small amount
 
-        # Additional reflection logic here, if applicable
+        # Cast a shadow ray from the hit point to the light
+        shadow_ray = Ray(shadow_origin, light_dir)
+        shadow_hit = False
 
+        for obj in objects:
+            shadow_dist = obj.intersect(shadow_ray)
+            if shadow_dist and 0 < shadow_dist < light_distance:
+                shadow_hit = True
+                break
+
+        if not shadow_hit:
+            # Perform shading calculations here since the point is not in shadow
+            if self.type == "Lambertian":
+                diffuse_intensity = max(np.dot(normal, light_dir), 0)
+                diffuse = self.diffuse_color * diffuse_intensity
+                color += diffuse
+
+            elif self.type == "Phong":
+                diffuse_intensity = max(np.dot(normal, light_dir), 0)
+                diffuse = self.diffuse_color * diffuse_intensity
+                color += diffuse
+
+                # Calculate specular component
+                reflect_dir = 2 * normal * np.dot(normal, light_dir) - light_dir
+                spec_angle = max(np.dot(view_dir, reflect_dir), 0)
+                specular = self.specular_color * (spec_angle ** self.exponent)
+                color += specular
+
+        # Return the color with or without lighting based on shadow
         return color
+
 
 
         
@@ -135,66 +155,61 @@ class Light:
         self.position = position
         self.intensity = intensity
 
+
+
 def render(scene, camera_settings, img_size):
     img = np.zeros((img_size[1], img_size[0], 3), dtype=np.uint8)
-    
-    # Unpack camera settings
+
     eye_pos = camera_settings['view_point']
     forward = camera_settings['view_dir'] / np.linalg.norm(camera_settings['view_dir'])
     right = np.cross(forward, camera_settings['view_up'])
+    right /= np.linalg.norm(right)  # Normalize the right vector
     up = np.cross(right, forward)
+    up /= np.linalg.norm(up)  # Normalize the up vector
     aspect_ratio = img_size[0] / img_size[1]
-    fov_height = camera_settings['view_height']
-    fov_width = camera_settings['view_width']
     proj_distance = camera_settings['proj_distance']
 
-    # Iterate over each pixel in the image
+    half_height = camera_settings['view_height'] / 2.0
+    half_width = aspect_ratio * half_height
+    image_center = eye_pos + forward * proj_distance
+
     for y in range(img_size[1]):
         for x in range(img_size[0]):
-            # Default background color
-            pixel_color = Color(0, 0, 0)
+            pixel_color = Color(0, 0, 0)  # Default background color, adjust as needed
+            # Convert pixel position to normalized [-0.5, 0.5] coordinates
+            nx = (x / img_size[0]) - 0.5
+            ny = 0.5 - (y / img_size[1])
             
-            # Calculate the direction of the primary ray
-            px = (2 * (x / img_size[0]) - 1) * aspect_ratio * fov_width
-            py = (1 - 2 * (y / img_size[1])) * fov_height
-            ray_dir = forward * proj_distance + px * right + py * up
-            ray_dir /= np.linalg.norm(ray_dir)
+            # Calculate position on the image plane
+            image_plane_pos = image_center + (nx * half_width * 2 * right) + (ny * half_height * 2 * up)
             
+            # Generate ray from the camera position through the point on the image plane
+            ray_dir = image_plane_pos - eye_pos
+            ray_dir /= np.linalg.norm(ray_dir)  # Normalize direction
             ray = Ray(eye_pos, ray_dir)
+            
             closest_dist = np.inf
-            hit_obj = None
+            hit_obj = None  # Initialize hit object as None
 
-            # Find the closest intersection
             for obj in scene['objects']:
                 dist = obj.intersect(ray)
                 if dist and 0 < dist < closest_dist:
                     closest_dist = dist
                     hit_obj = obj
 
-            # If there is an intersection, calculate the color at the intersection point
-            if hit_obj is not None:
+            if hit_obj:
                 hit_point = ray.origin + ray.direction * closest_dist
                 normal = (hit_point - hit_obj.center) / np.linalg.norm(hit_point - hit_obj.center)
                 view_dir = -ray.direction
-
-                # Check for shadow
-                is_shadowed = False
-                to_light = scene['light'].position - hit_point
-                shadow_ray = Ray(hit_point + normal * 0.001, to_light / np.linalg.norm(to_light))
-                for obj in scene['objects']:
-                    if obj is not hit_obj and obj.intersect(shadow_ray):
-                        is_shadowed = True
-                        break
-
-                if not is_shadowed:
-                    pixel_color = hit_obj.material.shade(ray, hit_point, normal, view_dir, scene['light'], scene['objects'])
-                else:
-                    # Optionally handle ambient light in shadows
-                    pixel_color = Color(0.1, 0.1, 0.1)  # Dim color for shadowed areas
-
-            img[y, x] = pixel_color.toUINT8()
+                pixel_color = hit_obj.material.shade(ray, hit_point, normal, view_dir, scene['light'], scene['objects'])
+                img[y, x] = pixel_color.toUINT8()
+            else:
+                # Set background color if no hit
+                img[y, x] = np.array([0, 0, 0], dtype=np.uint8)
 
     return img
+
+
 
 def parse_shader(shader_elem):
     type = shader_elem.get('type')
@@ -218,7 +233,7 @@ def parse_camera(camera_elem):
     view_height = float(camera_elem.find('viewHeight').text)
     
     proj_distance_elem = camera_elem.find('projDistance')
-    proj_distance = float(proj_distance_elem.text) if proj_distance_elem is not None else 2.0  # Default if not provided
+    proj_distance = float(proj_distance_elem.text) if proj_distance_elem is not None else 1.0  # Default if not provided
     
 
     return {
@@ -231,24 +246,29 @@ def parse_camera(camera_elem):
         'view_height': view_height
     }
 
+def parse_light(light_elem):
+    position = np.array(list(map(float, light_elem.find('position').text.split())))
+    intensity = Color.from_decimals(light_elem.find('intensity').text)
+    return Light(position, intensity)
+
 
 def main(xml_file):
     tree = ET.parse(xml_file)
     root = tree.getroot()
     
     camera_settings = parse_camera(root.find('camera'))
-
     shaders = {shader.get('name'): parse_shader(shader) for shader in root.findall('shader')}
 
+    light = parse_light(root.find('light'))  # Parse the light element
 
     scene = {
         'objects': [],
-        'light': Light(np.array([0, 5, 0]), Color(1, 1, 1))  # Assuming a single light for simplicity
+        'light': light,  # Add the parsed light to the scene
     }
 
     for surface in root.findall('surface'):
         if surface.get('type') == 'Sphere':
-            center = np.fromstring(surface.find('center').text, sep=' ')
+            center = np.array(list(map(float, surface.find('center').text.split())))
             radius = float(surface.find('radius').text)
             shader_ref = surface.find('shader').get('ref')
             material = shaders[shader_ref]
@@ -259,6 +279,6 @@ def main(xml_file):
     Image.fromarray(img, 'RGB').save(xml_file + '.png')
 
 
+
 if __name__ == "__main__":
     main(sys.argv[1])
-
